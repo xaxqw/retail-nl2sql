@@ -59,17 +59,22 @@ def _parse(text: str):
     return "reject", f"无法解析模型输出：{t[:80]}"
 
 
-def pick_model(question: str) -> str:
-    """模型路由：复杂问题用大模型，其余用主模型
+def pick_model(question: str, force: str = None) -> str:
+    """模型路由
 
-    实测 4b 生成速度是 7b 的两倍，但对多表句式遵从性差（会复述问题），
-    所以这里只保留接口，默认全部走主模型。
+    实测（8 题对照）：qwen2.5-coder:3b 平均 980ms，7b 平均 2606ms，快 2.7 倍；
+    SQL 结构正确率两者相同，但 3b 有 2 题执行失败（缺 GROUP BY、日期条件写错）。
+    所以策略是：复杂问题直接上 7b，简单问题先试 3b，执行失败再降级重试。
     """
-    return config.MODEL
+    if force:
+        return force
+    if any(s in question for s in config.COMPLEX_SIGNALS):
+        return config.MODEL
+    return config.FAST_MODEL
 
 
 def ask(question: str, explain: bool = False, use_cache: bool = True,
-        dataset: str = None) -> dict:
+        dataset: str = None, _force_model: str = None) -> dict:
     """
     执行一次自然语言问数。
 
@@ -134,7 +139,7 @@ def ask(question: str, explain: bool = False, use_cache: bool = True,
             return hit
 
     # ---------- 2. 生成 SQL ----------
-    model = pick_model(question)
+    model = pick_model(question, _force_model)
     res["model"] = model
 
     t_gen = time.perf_counter()
@@ -188,6 +193,12 @@ def ask(question: str, explain: bool = False, use_cache: bool = True,
         sql = payload2
 
     if cols is None:
+        # 小模型跑不通就换大模型重试一次（降级），而不是直接把错误抛给用户
+        if model == config.FAST_MODEL and not _force_model:
+            res["trace"]["fallback"] = 1
+            _record(res)
+            return ask(question, explain=explain, use_cache=False,
+                       dataset=dataset, _force_model=config.MODEL)
         res["status"] = "error"
         res["error"] = error
         res["answer"] = f"查询失败：{error}"
