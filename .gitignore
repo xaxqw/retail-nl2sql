@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 数据集产物：72MB，用 scripts/gen_data.py 重新生成即可
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# 评测明细（每次跑都会变，README 中有汇总）
+tests/result_*.csv
+
+# 日志与临时文件
+*.log
+pip_install.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>零售经营数据智能问数</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #f6f7f9; color: #1a1a1a;
+    font-family: -apple-system, "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    font-size: 14px; line-height: 1.65;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 36px 20px 80px; }
+  header h1 { margin: 0 0 6px; font-size: 22px; font-weight: 600; letter-spacing: .3px; }
+  header p { margin: 0 0 26px; color: #6b7280; font-size: 13px; }
+  .card {
+    background: #fff; border: 1px solid #e3e6ea; border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 16px;
+  }
+  textarea {
+    width: 100%; min-height: 64px; resize: vertical; padding: 12px 14px;
+    border: 1px solid #d5d9df; border-radius: 8px; font: inherit; color: inherit;
+    outline: none; transition: border-color .15s;
+  }
+  textarea:focus { border-color: #1b3b6f; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+  button {
+    font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid transparent;
+    padding: 9px 22px; transition: background .15s, opacity .15s;
+  }
+  #go { background: #1b3b6f; color: #fff; font-weight: 500; }
+  #go:hover { background: #14304f; }
+  #go:disabled { opacity: .55; cursor: default; }
+  .hint { color: #8b93a1; font-size: 12.5px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+  .chip {
+    background: #fff; border: 1px solid #e3e6ea; color: #3b4252;
+    padding: 6px 12px; border-radius: 999px; font-size: 12.5px; cursor: pointer;
+    transition: all .15s;
+  }
+  .chip:hover { border-color: #1b3b6f; color: #1b3b6f; }
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 500;
+  }
+  .b-ok    { background: #e6f2ea; color: #1c6b3a; }
+  .b-warn  { background: #fdf3dd; color: #8a5a08; }
+  .b-err   { background: #fbe9e9; color: #9b2c2c; }
+  .answer { font-size: 16px; font-weight: 500; margin: 12px 0 14px; line-height: 1.6; }
+  .meta { display: flex; gap: 22px; color: #6b7280; font-size: 12.5px; margin-bottom: 14px; }
+  .meta b { color: #1a1a1a; font-weight: 600; }
+  pre {
+    background: #f7f8fa; border: 1px solid #e8ebef; border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; margin: 0;
+    font-family: Consolas, "Courier New", monospace; font-size: 12.5px; line-height: 1.6;
+    color: #24303f;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; background: #f7f8fa; color: #3b4252; font-weight: 600;
+    padding: 8px 10px; border-bottom: 1px solid #e3e6ea; white-space: nowrap;
+  }
+  td { padding: 8px 10px; border-bottom: 1px solid #f0f2f5; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #fafbfc; }
+  .sect { margin-top: 14px; }
+  .sect-t {
+    font-size: 12px; color: #8b93a1; text-transform: uppercase;
+    letter-spacing: .6px; margin-bottom: 6px;
+  }
+  .empty { color: #8b93a1; text-align: center; padding: 40px 0; font-size: 13px; }
+  .spin {
+    display: inline-block; width: 13px; height: 13px; margin-right: 8px;
+    border: 2px solid #cfd5de; border-top-color: #1b3b6f; border-radius: 50%;
+    animation: rot .7s linear infinite; vertical-align: -2px;
+  }
+  @keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>零售经营数据智能问数</h1>
+    <p>自然语言 → SQL → 结论｜4 个维表 + 2 个事实表｜50 万条订单 · 只读查询 · 表白名单校验</p>
+  </header>
+
+  <div class="card">
+    <textarea id="q" placeholder="例如：上个月华东区卖得最好的三个品类是什么"></textarea>
+    <div class="row">
+      <button id="go">查询</button>
+      <span class="hint" id="status"></span>
+    </div>
+  </div>
+
+  <div class="chips" id="chips"></div>
+  <div id="out"><div class="card"><div class="empty">输入问题或点上方示例开始</div></div></div>
+</div>
+
+<script>
+const EXAMPLES = [
+  "上个月各渠道的销售额分别是多少",
+  "退货率最高的五个品类",
+  "哪个大区的客单价最高",
+  "最近三个月京东的订单量趋势",
+  "毛利率最低的三个品类",
+  "VIP 客户和新客的客单价差多少",
+  "今年双11当天的销售额",
+  "查一下客户000123的手机号"
+];
+
+const STATUS = {
+  ok:      ["查询成功", "b-ok"],
+  clarify: ["需要澄清", "b-warn"],
+  reject:  ["已拒绝",   "b-err"],
+  error:   ["执行失败", "b-err"]
+};
+
+const out = document.getElementById("out");
+const chips = document.getElementById("chips");
+const ta = document.getElementById("q");
+const go = document.getElementById("go");
+const st = document.getElementById("status");
+
+EXAMPLES.forEach(t => {
+  const b = document.createElement("span");
+  b.className = "chip";
+  b.textContent = t;
+  b.onclick = () => { ta.value = t; ask(); };
+  chips.appendChild(b);
+});
+
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function fmt(v) {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "number") {
+    if (Number.isInteger(v)) return v.toLocaleString("zh-CN");
+    return v.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+  }
+  return esc(v);
+}
+
+function render(res) {
+  const [label, cls] = STATUS[res.status] || [res.status, "b-err"];
+  let html = '<div class="card">';
+  html += `<span class="badge ${cls}">${label}</span>`;
+  html += `<div class="answer">${esc(res.answer) || "—"}</div>`;
+  html += '<div class="meta">'
+        + `<span>耗时 <b>${(res.elapsed_ms / 1000).toFixed(2)} s</b></span>`
+        + `<span>重试 <b>${res.retries}</b></span>`
+        + `<span>返回 <b>${res.rows.length}</b> 行</span>`
+        + '</div>';
+
+  if (res.sql) {
+    html += '<div class="sect"><div class="sect-t">生成的 SQL</div>'
+          + `<pre>${esc(res.sql)}</pre></div>`;
+  }
+
+  if (res.rows && res.rows.length) {
+    html += '<div class="sect"><div class="sect-t">查询结果</div><table><thead><tr>';
+    res.columns.forEach(c => html += `<th>${esc(c)}</th>`);
+    html += '</tr></thead><tbody>';
+    res.rows.slice(0, 50).forEach(r => {
+      html += '<tr>' + r.map(v => `<td>${fmt(v)}</td>`).join("") + '</tr>';
+    });
+    html += '</tbody></table>';
+    if (res.rows.length > 50) {
+      html += `<div class="hint" style="margin-top:8px">仅显示前 50 行，共 ${res.rows.length} 行</div>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.error) {
+    html += '<div class="sect"><div class="sect-t">错误详情</div>'
+          + `<pre>${esc(res.error)}</pre></div>`;
+  }
+  html += '</div>';
+  out.innerHTML = html;
+}
+
+async function ask() {
+  const q = ta.value.trim();
+  if (!q) return;
+  go.disabled = true;
+  st.innerHTML = '<span class="spin"></span>正在生成 SQL 并执行…';
+  out.innerHTML = '<div class="card"><div class="empty">处理中…</div></div>';
+  const t0 = Date.now();
+  try {
+    const r = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: q })
+    });
+    const data = await r.json();
+    if (data.error) {
+      out.innerHTML = `<div class="card"><span class="badge b-err">请求失败</span>`
+                    + `<div class="answer">${esc(data.error)}</div></div>`;
+    } else {
+      render(data);
+    }
+  } catch (e) {
+    out.innerHTML = `<div class="card"><span class="badge b-err">网络错误</span>`
+                  + `<div class="answer">${esc(e.message)}</div></div>`;
+  } finally {
+    go.disabled = false;
+    st.textContent = `本次请求 ${((Date.now() - t0) / 1000).toFixed(1)} s`;
+  }
+}
+
+go.onclick = ask;
+ta.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") ask();
+});
+
+fetch("/api/health").then(r => r.json()).then(h => {
+  if (h.llm && h.llm.ok) {
+    st.textContent = `模型 ${h.llm.model} 就绪`;
+  } else {
+    st.textContent = "模型服务未就绪，请先启动 Ollama";
+  }
+}).catch(() => {});
+</script>
+</body>
+</html>
