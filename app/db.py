@@ -7,16 +7,53 @@ import sqlite3
 from . import config
 
 
-def get_conn() -> sqlite3.Connection:
-    """只读方式打开数据库，从连接层面杜绝写操作"""
-    if not os.path.exists(config.DB_PATH):
+def get_conn(db_path: str = None) -> sqlite3.Connection:
+    """只读方式打开数据库，从连接层面杜绝写操作
+
+    db_path 为 None 时用内置零售库；上传数据集传自己的库路径。
+    """
+    path = db_path or config.DB_PATH
+    if not os.path.exists(path):
         raise FileNotFoundError(
-            f"数据库不存在: {config.DB_PATH}\n请先运行 scripts/gen_data.py 生成数据"
+            f"数据库不存在: {path}\n请先运行 scripts/gen_data.py 生成数据"
         )
-    uri = f"file:{config.DB_PATH}?mode=ro"
+    uri = f"file:{path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=config.QUERY_TIMEOUT)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def schema_for_upload(meta: dict) -> str:
+    """上传数据集的 schema 描述：列名 + 类型 + 样例值
+
+    没有人工维护的字段说明，只能靠样例值让模型猜出字段含义，
+    所以 each column 都要带上 3-5 个真实取值。
+    """
+    lines = [f'### {meta["table"]}',
+             f'共 {meta["rows"]} 行，{meta["cols"]} 列，为上传的数据文件《{meta["name"]}》。']
+    for col in meta["headers"]:
+        info = (meta.get("columns") or {}).get(col, {})
+        t = info.get("type", "TEXT")
+        samples = info.get("samples") or []
+        seg = f"  - {col} {t}"
+        if samples:
+            seg += "  // 样例：" + "、".join(str(s)[:14] for s in samples[:4])
+        lines.append(seg)
+    return "\n".join(lines)
+
+
+def tables_in(db_path: str):
+    """列出某库里可查询的表（排除内部元数据表）"""
+    conn = get_conn(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' AND name != '_meta_schema'"
+        )
+        return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
 
 
 def load_schema() -> str:
@@ -61,9 +98,9 @@ def load_schema() -> str:
         conn.close()
 
 
-def run_query(sql: str):
+def run_query(sql: str, db_path: str = None):
     """执行只读查询，返回 (列名列表, 行列表)"""
-    conn = get_conn()
+    conn = get_conn(db_path)
     try:
         cur = conn.cursor()
         cur.execute(sql)

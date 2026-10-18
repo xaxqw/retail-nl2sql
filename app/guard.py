@@ -19,10 +19,15 @@ _TABLE = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)", re.I)
 _CTE = re.compile(r"(?:\bwith|,)\s+([A-Za-z_][A-Za-z0-9_]*)\s+as\s*\(", re.I)
 
 
-def validate(sql: str):
-    """返回 (是否通过, 原因)"""
+def validate(sql: str, allowed_tables=None):
+    """返回 (是否通过, 原因)
+
+    allowed_tables 为空时用内置零售库的白名单；上传数据集传入自己的表名。
+    """
     if not sql or not sql.strip():
         return False, "SQL 为空"
+
+    allowed = {t.lower() for t in (allowed_tables or config.ALLOWED_TABLES)}
 
     s = sql.strip().rstrip(";")
 
@@ -36,7 +41,7 @@ def validate(sql: str):
 
     tables = {t.lower() for t in _TABLE.findall(s)}
     cte_names = {n.lower() for n in _CTE.findall(s)}
-    bad = tables - config.ALLOWED_TABLES - cte_names
+    bad = tables - allowed - cte_names
     if bad:
         return False, f"访问未授权表: {', '.join(sorted(bad))}"
 

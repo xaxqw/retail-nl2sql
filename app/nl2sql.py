@@ -12,7 +12,7 @@ import time
 import uuid
 from functools import lru_cache
 
-from . import cache, config, db, guard, llm, metrics, prompt, summary
+from . import cache, config, db, guard, ingest, llm, metrics, prompt, summary
 
 
 @lru_cache(maxsize=1)
@@ -35,6 +35,13 @@ def _stats() -> dict:
 def _system() -> str:
     """提示词只拼一次并缓存，保证每次请求前缀完全一致，KV cache 才能复用"""
     return prompt.build_system(_schema(), _stats(), config.ROW_LIMIT)
+
+
+def _upload_system(meta: dict) -> str:
+    """上传数据集的提示词：每次按元数据生成，内容稳定即可复用 KV cache"""
+    return prompt.build_upload_system(
+        db.schema_for_upload(meta), config.ROW_LIMIT
+    )
 
 
 def _parse(text: str):
@@ -61,15 +68,40 @@ def pick_model(question: str) -> str:
     return config.MODEL
 
 
-def ask(question: str, explain: bool = False, use_cache: bool = True) -> dict:
+def ask(question: str, explain: bool = False, use_cache: bool = True,
+        dataset: str = None) -> dict:
     """
     执行一次自然语言问数。
 
     explain=False 时用规则模板生成结论（毫秒级）；True 时调用模型润色（约 1.2 s）。
+    dataset 为 None 时查内置零售库；传上传数据集 id 则查那个文件。
     返回 dict：trace_id/status/sql/columns/rows/answer/error/retries/elapsed_ms/trace
     """
     t0 = time.perf_counter()
     trace_id = uuid.uuid4().hex[:12]
+
+    # ---------- 0. 数据集上下文 ----------
+    if dataset:
+        meta = ingest.get_dataset(dataset)
+        if not meta:
+            return {
+                "trace_id": trace_id, "question": question, "status": "error",
+                "sql": "", "columns": [], "rows": [],
+                "answer": "数据集不存在或已被删除，请重新上传",
+                "error": "dataset not found", "retries": 0,
+                "cached": False, "cache": "miss", "model": "",
+                "dataset": dataset, "elapsed_ms": 0, "trace": {},
+            }
+        db_path = meta["db_path"]
+        allowed = [meta["table"]]
+        system = _upload_system(meta)
+        cache_key = f"[{dataset}] {question}"
+    else:
+        db_path = None
+        allowed = None
+        system = _system()
+        cache_key = question
+
     res = {
         "trace_id": trace_id,
         "question": question,
@@ -83,17 +115,19 @@ def ask(question: str, explain: bool = False, use_cache: bool = True) -> dict:
         "cached": False,
         "cache": "miss",
         "model": "",
+        "dataset": dataset or "",
         "elapsed_ms": 0,
         "trace": {},
     }
 
     # ---------- 1. 缓存 ----------
     if use_cache and config.CACHE_ENABLED:
-        hit, how = cache.CACHE.get(question)
+        hit, how = cache.CACHE.get(cache_key)
         if hit:
             hit["trace_id"] = trace_id
             hit["cached"] = True
             hit["cache"] = how
+            hit["dataset"] = dataset or ""
             hit["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
             hit["trace"] = {"cache_ms": hit["elapsed_ms"]}
             _record(hit)
@@ -102,7 +136,6 @@ def ask(question: str, explain: bool = False, use_cache: bool = True) -> dict:
     # ---------- 2. 生成 SQL ----------
     model = pick_model(question)
     res["model"] = model
-    system = _system()
 
     t_gen = time.perf_counter()
     raw = llm.chat(system, question, model=model)
@@ -122,12 +155,12 @@ def ask(question: str, explain: bool = False, use_cache: bool = True) -> dict:
 
     # ---------- 3. 校验 / 执行 / 回灌重试 ----------
     while attempt <= config.MAX_RETRY:
-        ok, reason = guard.validate(sql)
+        ok, reason = guard.validate(sql, allowed)
         if ok:
             final_sql = guard.ensure_limit(sql)
             t_exec = time.perf_counter()
             try:
-                cols, rows = db.run_query(final_sql)
+                cols, rows = db.run_query(final_sql, db_path)
                 res["trace"]["execute_ms"] = int((time.perf_counter() - t_exec) * 1000)
                 res["sql"] = final_sql
                 error = ""
@@ -176,7 +209,7 @@ def ask(question: str, explain: bool = False, use_cache: bool = True) -> dict:
         res["answer"] = summary.summarize(cols, rows, question)
     res["trace"]["summary_ms"] = int((time.perf_counter() - t_sum) * 1000)
 
-    return _finish(res, t0, cacheable=True)
+    return _finish(res, t0, cacheable=True, cache_key=cache_key)
 
 
 def _record(res: dict):
@@ -199,11 +232,11 @@ def _record(res: dict):
         pass
 
 
-def _finish(res: dict, t0: float, cacheable: bool) -> dict:
+def _finish(res: dict, t0: float, cacheable: bool, cache_key: str = None) -> dict:
     res["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
     if cacheable and res["status"] == "ok":
         try:
-            cache.CACHE.put(res["question"], res)
+            cache.CACHE.put(cache_key or res["question"], res)
         except Exception:
             pass
     _record(res)

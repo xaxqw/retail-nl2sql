@@ -9,6 +9,7 @@
     http://127.0.0.1:8000
 """
 
+import base64
 import json
 import os
 import sys
@@ -20,7 +21,7 @@ from urllib.parse import urlparse
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from app import cache, config, db, llm, metrics, nl2sql  # noqa: E402
+from app import cache, config, db, ingest, llm, metrics, nl2sql  # noqa: E402
 
 STATIC_DIR = os.path.join(ROOT, "static")
 MIME = {
@@ -78,6 +79,13 @@ class Handler(BaseHTTPRequestHandler):
                 })
             elif p == "/api/metrics/recent":
                 self._json({"recent": metrics.METRICS.recent(30)})
+            elif p == "/api/datasets":
+                self._json({"datasets": [
+                    {k: d[k] for k in
+                     ("id", "name", "table", "rows", "cols", "headers", "created")
+                     if k in d}
+                    for d in ingest.list_datasets()
+                ]})
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:
@@ -89,6 +97,36 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b"{}"
             data = json.loads(raw.decode("utf-8") or "{}")
+
+            if p == "/api/upload":
+                # 前端把文件读成 text 或 base64 传上来，避免手写 multipart 解析
+                name = (data.get("name") or "upload.csv").strip()
+                b64 = data.get("content_base64")
+                text = data.get("text")
+                if b64:
+                    raw = base64.b64decode(b64)
+                elif text is not None:
+                    raw = text.encode("utf-8")
+                else:
+                    self._json({"error": "缺少 content_base64 或 text"}, 400)
+                    return
+                try:
+                    meta = ingest.build_dataset(name, raw)
+                except ValueError as e:
+                    self._json({"error": str(e)}, 400)
+                    return
+                except Exception as e:
+                    self._json({"error": f"解析失败：{type(e).__name__}: {e}"}, 500)
+                    return
+                self._json({
+                    "ok": True,
+                    "dataset": {
+                        k: meta[k] for k in
+                        ("id", "name", "table", "rows", "cols",
+                         "headers", "types", "created")
+                    },
+                })
+                return
 
             if p == "/api/cache/clear":
                 cache.CACHE.clear()
@@ -127,6 +165,7 @@ class Handler(BaseHTTPRequestHandler):
                 q,
                 explain=bool(data.get("explain", False)),
                 use_cache=bool(data.get("use_cache", True)),
+                dataset=(data.get("dataset") or None),
             )
             self._json(res)
         except llm.LLMError as e:

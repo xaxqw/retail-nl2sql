@@ -148,6 +148,38 @@ def retry_system(schema: str, stats: dict, limit: int) -> str:
     return build_system(schema, stats, limit)
 
 
+# ---------------- 上传数据集 ----------------
+
+UPLOAD_TMPL = """你是数据分析助手。用户上传了一份数据文件，你要把中文问题转换成 SQLite 查询。
+
+## 数据结构
+{schema}
+
+## 规则
+1. 只能使用上面列出的表和列。**表名和列名含中文时必须用双引号包裹**，
+   例如 SELECT "销售额" FROM "城市销售数据"
+2. 聚合函数要选对，这是最容易错的地方：
+   - 问「合计 / 总共 / 总额」→ SUM(字段)
+   - 问「最多 / 最高 / 最大」→ 对数量字段用 SUM 排序，不要用 COUNT（COUNT 数的是行数）
+   - 问「有多少条 / 几笔」→ COUNT(*)
+   - 问「平均」→ AVG(字段)
+3. 对比两个取值的差（如"A 和 B 相差多少"）要用条件聚合，不要分组后取一行：
+   SELECT SUM(CASE WHEN "城市"='上海' THEN "销售额" ELSE 0 END)
+        - SUM(CASE WHEN "城市"='北京' THEN "销售额" ELSE 0 END) AS 差值
+   FROM "城市销售数据"
+4. 日期列若为 TEXT，格式见样例值；写条件前先对照样例判断是 'YYYY-MM-DD' 还是 'YYYY/M/D'
+5. 未指定时间范围时统计全部数据，不要反问
+6. 只输出一条 SELECT 语句，不带分号，不要 ``` 包裹
+7. 聚合查询用 GROUP BY 并给 ORDER BY；明细查询加 LIMIT {limit}
+8. 问题涉及的字段在这份数据里不存在时，输出：REJECT: 简短原因
+9. 含"这个/那个/它"等指代但无上下文时，输出：CLARIFY: 一个具体问题
+"""
+
+
+def build_upload_system(schema: str, limit: int) -> str:
+    return UPLOAD_TMPL.replace("{schema}", schema).replace("{limit}", str(limit))
+
+
 def retry_user(question: str, bad_sql: str, error: str) -> str:
     return (
         f"原问题：{question}\n\n"

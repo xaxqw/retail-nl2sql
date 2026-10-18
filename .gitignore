@@ -11,6 +11,9 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 
+# 用户上传的数据集属于个人数据，不入库
+data/uploads/
+
 # 评测明细（每次跑都会变，README 中有汇总）
 tests/result_*.csv
 

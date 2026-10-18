@@ -105,6 +105,43 @@
   }
   .chip:hover{border-color:#C3D3EC;color:var(--accent);background:#FBFCFE;transform:translateY(-1px)}
 
+  /* ---------- 数据源 ---------- */
+  .sources{
+    display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+    margin:18px 0 4px;padding-bottom:14px;border-bottom:1px solid var(--line);
+  }
+  .src{
+    display:inline-flex;align-items:center;gap:7px;font-family:inherit;
+    font-size:12.5px;color:var(--ink-2);background:var(--card);
+    border:1px solid var(--line);border-radius:8px;padding:6px 12px;
+    cursor:pointer;transition:all .15s;
+  }
+  .src:hover{border-color:#C3D3EC}
+  .src.active{background:var(--brand);border-color:var(--brand);color:#fff}
+  .src.active .meta{color:rgba(255,255,255,.72)}
+  .src .meta{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+  .upload{
+    margin-left:auto;display:inline-flex;align-items:center;gap:6px;
+    font-size:12.5px;color:var(--accent);background:var(--accent-soft);
+    border:1px dashed #BFD4F5;border-radius:8px;padding:6px 13px;
+    cursor:pointer;transition:all .15s;
+  }
+  .upload:hover{background:#E4EEFF;border-color:#93B4EE}
+  .drop-mask{
+    position:fixed;inset:0;background:rgba(30,58,95,.55);z-index:99;
+    display:none;align-items:center;justify-content:center;color:#fff;
+  }
+  .drop-mask.show{display:flex}
+  .drop-mask > div{
+    border:2px dashed rgba(255,255,255,.55);border-radius:16px;
+    padding:44px 68px;text-align:center;font-size:15px;font-weight:500;
+  }
+  .drop-mask small{display:block;font-size:12.5px;font-weight:400;opacity:.82;margin-top:7px}
+  .cols{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+  .col{font-size:11px;background:#F3F5F8;color:var(--ink-2);border-radius:5px;padding:2px 8px}
+  .col b{font-weight:600;color:var(--ink)}
+  .col em{font-style:normal;color:var(--ink-3);margin-left:4px}
+
   /* ---------- 结果 ---------- */
   .result{
     background:var(--card);border:1px solid var(--line);
@@ -254,6 +291,14 @@
     </div>
   </section>
 
+  <div class="sources" id="sources">
+    <label class="upload">
+      <input type="file" id="file" accept=".csv,.txt,.tsv,.xlsx" hidden>
+      + 上传 CSV / Excel
+    </label>
+  </div>
+  <div class="cols" id="cols"></div>
+
   <div class="examples" id="examples"></div>
   <div id="out">
     <div class="empty">
@@ -271,6 +316,10 @@
     <span class="sep"></span>
     <span>qwen2.5:7b · 本地私有化</span>
   </footer>
+</div>
+
+<div class="drop-mask" id="dropMask">
+  <div>松开即可上传<small>支持 .csv / .xlsx / .txt / .tsv，单个文件不超过 20 MB</small></div>
 </div>
 
 <script>
@@ -397,7 +446,7 @@ async function ask(){
     const r = await fetch("/api/ask", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({question:q})
+      body:JSON.stringify({question:q, dataset: currentDataset || undefined})
     });
     const data = await r.json();
     if (data.error){
@@ -444,8 +493,119 @@ ta.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") ask();
 });
 
+/* ---------- 数据源管理 ---------- */
+let currentDataset = "";
+let datasets = [];
+
+function renderSources(){
+  const box = $("sources");
+  const up = box.querySelector(".upload");
+  box.querySelectorAll(".src").forEach(n => n.remove());
+
+  const make = (id, name, metaTxt) => {
+    const b = document.createElement("button");
+    b.className = "src" + (currentDataset === id ? " active" : "");
+    b.innerHTML = `${esc(name)} <span class="meta">${esc(metaTxt)}</span>`;
+    b.onclick = () => {
+      currentDataset = id;
+      renderSources(); renderCols();
+      ta.placeholder = id
+        ? "就这份文件提问，比如：各城市销售额合计从高到低排序"
+        : "问点什么，比如：上个月各渠道的销售额分别是多少";
+    };
+    return b;
+  };
+
+  box.insertBefore(make("", "内置零售库", "50 万订单"), up);
+  datasets.forEach(d => {
+    box.insertBefore(make(d.id, d.name, `${d.rows} 行`), up);
+  });
+}
+
+function renderCols(){
+  const box = $("cols");
+  const ds = datasets.find(d => d.id === currentDataset);
+  if (!ds || !ds.headers){ box.innerHTML = ""; return; }
+  box.innerHTML = ds.headers.map((h, i) =>
+    `<span class="col"><b>${esc(h)}</b><em>${esc((ds.types || [])[i] || "")}</em></span>`
+  ).join("");
+}
+
+async function loadDatasets(){
+  try{
+    const r = await fetch("/api/datasets");
+    const d = await r.json();
+    datasets = d.datasets || [];
+    if (currentDataset && !datasets.some(x => x.id === currentDataset)) currentDataset = "";
+    renderSources(); renderCols();
+  }catch(e){}
+}
+
+async function uploadFile(f){
+  const name = f.name;
+  const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
+  out.innerHTML = `<div class="loading"><span class="spin"></span>正在解析 ${esc(name)}…</div>`;
+  try{
+    const payload = { name };
+    if (ext === ".xlsx"){
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      payload.content_base64 = btoa(bin);
+    } else {
+      payload.text = await f.text();
+    }
+    const r = await fetch("/api/upload", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (d.error){
+      out.innerHTML = `<div class="err-box"><div class="t">上传失败</div><div class="d">${esc(d.error)}</div></div>`;
+      return;
+    }
+    currentDataset = d.dataset.id;
+    await loadDatasets();
+    ta.value = "";
+    ta.placeholder = `就《${d.dataset.name}》提问，比如：各城市销售额合计从高到低排序`;
+    const chips = (d.dataset.headers || []).map((h, i) =>
+      `<span class="col"><b>${esc(h)}</b><em>${esc((d.dataset.types || [])[i] || "")}</em></span>`
+    ).join("");
+    out.innerHTML = `
+      <div class="result">
+        <div class="r-head">
+          <span class="badge b-ok">上传成功</span>
+          <span class="r-time">${d.dataset.rows} 行 · ${d.dataset.cols} 列</span>
+        </div>
+        <div class="answer">已载入《${esc(d.dataset.name)}》，可以直接提问了。</div>
+        <div class="cols">${chips}</div>
+      </div>`;
+  }catch(e){
+    out.innerHTML = `<div class="err-box"><div class="t">上传异常</div><div class="d">${esc(e.message)}</div></div>`;
+  }
+}
+
+$("file").addEventListener("change", e => {
+  if (e.target.files[0]) uploadFile(e.target.files[0]);
+  e.target.value = "";
+});
+
+let dragDepth = 0;
+window.addEventListener("dragenter", e => {
+  e.preventDefault(); dragDepth++; $("dropMask").classList.add("show");
+});
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("dragleave", e => {
+  if (--dragDepth <= 0){ dragDepth = 0; $("dropMask").classList.remove("show"); }
+});
+window.addEventListener("drop", e => {
+  e.preventDefault(); dragDepth = 0; $("dropMask").classList.remove("show");
+  if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+});
+
 refreshHealth();
 refreshMetrics();
+loadDatasets();
 setInterval(refreshMetrics, 30000);
 </script>
 </body>
