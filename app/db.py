@@ -89,3 +89,24 @@ def table_stats():
     finally:
         conn.close()
     return out
+
+
+_CN_CACHE = {}
+
+
+def column_cn_map() -> dict:
+    """字段名 -> 中文名，用于把结论里的英文列名换成人话"""
+    global _CN_CACHE
+    if _CN_CACHE:
+        return _CN_CACHE
+    try:
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT column_name, cn_name FROM _meta_schema")
+            _CN_CACHE = {k: v for k, v in cur.fetchall() if v}
+        finally:
+            conn.close()
+    except Exception:
+        _CN_CACHE = {}
+    return _CN_CACHE

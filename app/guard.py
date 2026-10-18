@@ -15,6 +15,9 @@ _DANGER = re.compile(
 # 提取 FROM / JOIN 后面的表名
 _TABLE = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)", re.I)
 
+# CTE 定义的临时表名（WITH t AS (...)，t 不是真实表，不该被白名单拦下）
+_CTE = re.compile(r"(?:\bwith|,)\s+([A-Za-z_][A-Za-z0-9_]*)\s+as\s*\(", re.I)
+
 
 def validate(sql: str):
     """返回 (是否通过, 原因)"""
@@ -32,7 +35,8 @@ def validate(sql: str):
         return False, f"包含禁止关键字 {m.group(0).upper()}"
 
     tables = {t.lower() for t in _TABLE.findall(s)}
-    bad = tables - config.ALLOWED_TABLES
+    cte_names = {n.lower() for n in _CTE.findall(s)}
+    bad = tables - config.ALLOWED_TABLES - cte_names
     if bad:
         return False, f"访问未授权表: {', '.join(sorted(bad))}"
 

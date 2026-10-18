@@ -12,13 +12,15 @@
 import json
 import os
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from app import db, llm, nl2sql  # noqa: E402
+from app import cache, config, db, llm, metrics, nl2sql  # noqa: E402
 
 STATIC_DIR = os.path.join(ROOT, "static")
 MIME = {
@@ -69,6 +71,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"llm": llm.health(), "tables": tables})
             elif p == "/api/schema":
                 self._json({"schema": db.load_schema()})
+            elif p == "/api/metrics":
+                self._json({
+                    "metrics": metrics.METRICS.snapshot(),
+                    "cache": cache.CACHE.stats(),
+                })
+            elif p == "/api/metrics/recent":
+                self._json({"recent": metrics.METRICS.recent(30)})
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:
@@ -76,13 +85,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = urlparse(self.path).path
-        if p != "/api/ask":
-            self._json({"error": "not found"}, 404)
-            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b"{}"
             data = json.loads(raw.decode("utf-8") or "{}")
+
+            if p == "/api/cache/clear":
+                cache.CACHE.clear()
+                self._json({"ok": True, "cache": cache.CACHE.stats()})
+                return
+
+            if p == "/api/feedback":
+                # 收集 badcase：写进 feedback.jsonl，后续做回归测试集
+                item = {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "trace_id": data.get("trace_id", ""),
+                    "question": data.get("question", ""),
+                    "sql": data.get("sql", ""),
+                    "vote": data.get("vote", "down"),
+                    "comment": data.get("comment", ""),
+                }
+                path = os.path.join(config.BASE_DIR, "logs", "feedback.jsonl")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                self._json({"ok": True})
+                return
+
+            if p != "/api/ask":
+                self._json({"error": "not found"}, 404)
+                return
+
             q = (data.get("question") or "").strip()
             if not q:
                 self._json({"error": "question 不能为空"}, 400)
@@ -90,7 +123,11 @@ class Handler(BaseHTTPRequestHandler):
             if len(q) > 200:
                 self._json({"error": "问题过长，请控制在 200 字以内"}, 400)
                 return
-            res = nl2sql.ask(q, explain=bool(data.get("explain", True)))
+            res = nl2sql.ask(
+                q,
+                explain=bool(data.get("explain", False)),
+                use_cache=bool(data.get("use_cache", True)),
+            )
             self._json(res)
         except llm.LLMError as e:
             self._json({"error": str(e)}, 503)
@@ -111,8 +148,30 @@ def main():
         print(f"数据表   : {db.table_stats()}")
     except Exception as e:
         print(f"数据表   : 读取失败 {e}")
+
+    # 预热 embedding：首次加载要 6 秒，不能让第一个真实请求承担
+    print("预热语义缓存向量模型 ...", end=" ", flush=True)
+    t = time.perf_counter()
+    try:
+        llm.embed("预热")
+        print(f"完成 {(time.perf_counter() - t) * 1000:.0f} ms")
+    except Exception as e:
+        print(f"跳过（{type(e).__name__}），语义缓存将不可用")
+
     print(f"访问地址 : http://127.0.0.1:{port}")
     print("=" * 56)
+
+    # 后台预热主模型：冷加载要 50 秒，不预热的话第一个真实请求要干等
+    def _warmup():
+        t = time.perf_counter()
+        try:
+            llm.chat("你是一个助手", "只回答一个字：好", num_predict=4)
+            print(f"[预热] 主模型已就绪，加载耗时 {time.perf_counter() - t:.0f}s", flush=True)
+        except Exception as e:
+            print(f"[预热] 主模型预热失败：{type(e).__name__}", flush=True)
+
+    threading.Thread(target=_warmup, daemon=True).start()
+
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 
 

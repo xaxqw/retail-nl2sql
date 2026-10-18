@@ -14,11 +14,18 @@ data/*.db-shm
 # 评测明细（每次跑都会变，README 中有汇总）
 tests/result_*.csv
 
-# 日志与临时文件
+# 日志与临时文件（requests.jsonl / feedback.jsonl 属于运行产物）
+logs/
 *.log
 pip_install.log
 .DS_Store
 Thumbs.db
+
+# 一次性性能探针，分析结论已写进 README，不重复入库
+diag_perf.py
+bench_models.py
+bench_detail.py
+bench_ctx.py
 
 # IDE
 .idea/

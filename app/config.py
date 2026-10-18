@@ -8,9 +8,24 @@ DB_PATH = os.path.join(BASE_DIR, "data", "retail_v1.db")
 
 # 模型服务
 OLLAMA_URL = "http://localhost:11434"
-MODEL = "qwen2.5:7b"
+MODEL = "qwen2.5:7b"            # 复杂查询用
+FAST_MODEL = "qwen3:4b-fast"    # 简单查询走小模型（模型路由）
+EMBED_MODEL = "bge-m3"          # 语义缓存用
 TEMPERATURE = 0.0
 LLM_TIMEOUT = 180
+NUM_PREDICT = 256               # SQL 一般 60-120 token，512 是浪费
+KEEP_ALIVE = "30m"              # 常驻显存，避免冷启动
+
+# 模型路由：问题里出现这些信号时用大模型，否则用小模型
+COMPLEX_SIGNALS = (
+    "退货率", "毛利率", "客单价", "占比", "趋势", "同比", "环比",
+    "关联", "分别", "对比", "排名", "贡献", "分布", "分层",
+)
+
+# 语义缓存
+CACHE_ENABLED = True
+CACHE_SIZE = 256                # 最多缓存多少条
+CACHE_SIM_THRESHOLD = 0.93      # 余弦相似度超过该值视为同一个问题
 
 # 查询限制
 MAX_RETRY = 1          # SQL 执行失败后回灌重试次数

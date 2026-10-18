@@ -47,6 +47,7 @@
   .b-ok    { background: #e6f2ea; color: #1c6b3a; }
   .b-warn  { background: #fdf3dd; color: #8a5a08; }
   .b-err   { background: #fbe9e9; color: #9b2c2c; }
+  .b-cache { background: #e8eef8; color: #1b3b6f; }
   .answer { font-size: 16px; font-weight: 500; margin: 12px 0 14px; line-height: 1.6; }
   .meta { display: flex; gap: 22px; color: #6b7280; font-size: 12.5px; margin-bottom: 14px; }
   .meta b { color: #1a1a1a; font-weight: 600; }
@@ -146,13 +147,24 @@ function fmt(v) {
 
 function render(res) {
   const [label, cls] = STATUS[res.status] || [res.status, "b-err"];
+  const cacheTag = res.cached
+    ? `<span class="badge b-cache">缓存命中 · ${esc(res.cache)}</span>`
+    : "";
+  const t = res.trace || {};
+  const stage = [];
+  if (t.generate_ms) stage.push(`生成 ${t.generate_ms}ms`);
+  if (t.execute_ms) stage.push(`查询 ${t.execute_ms}ms`);
+  if (t.summary_ms) stage.push(`结论 ${t.summary_ms}ms`);
+  if (t.retry_ms) stage.push(`重试 ${t.retry_ms}ms`);
+
   let html = '<div class="card">';
-  html += `<span class="badge ${cls}">${label}</span>`;
+  html += `<span class="badge ${cls}">${label}</span> ${cacheTag}`;
   html += `<div class="answer">${esc(res.answer) || "—"}</div>`;
   html += '<div class="meta">'
         + `<span>耗时 <b>${(res.elapsed_ms / 1000).toFixed(2)} s</b></span>`
         + `<span>重试 <b>${res.retries}</b></span>`
         + `<span>返回 <b>${res.rows.length}</b> 行</span>`
+        + (stage.length ? `<span>${stage.join(" · ")}</span>` : "")
         + '</div>';
 
   if (res.sql) {

@@ -27,10 +27,15 @@ def _post(url: str, payload: dict, timeout: int) -> dict:
         raise LLMError(f"模型返回非 JSON: {e}") from e
 
 
-def chat(system: str, user: str, temperature: float = None) -> str:
-    """调用 Ollama /api/chat，返回文本内容"""
+def chat(system: str, user: str, temperature: float = None,
+         model: str = None, num_predict: int = None,
+         keep_alive: str = None) -> str:
+    """调用 Ollama /api/chat，返回文本内容
+
+    model / num_predict / keep_alive 可按请求覆盖，用于模型路由与性能调优。
+    """
     payload = {
-        "model": config.MODEL,
+        "model": model or config.MODEL,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -38,8 +43,9 @@ def chat(system: str, user: str, temperature: float = None) -> str:
         "stream": False,
         "options": {
             "temperature": config.TEMPERATURE if temperature is None else temperature,
-            "num_predict": 512,
+            "num_predict": num_predict or config.NUM_PREDICT,
         },
+        "keep_alive": keep_alive or config.KEEP_ALIVE,
     }
     res = _post(f"{config.OLLAMA_URL}/api/chat", payload, config.LLM_TIMEOUT)
     msg = res.get("message") or {}
@@ -47,6 +53,59 @@ def chat(system: str, user: str, temperature: float = None) -> str:
     if not content:
         raise LLMError("模型返回空内容")
     return content
+
+
+def chat_stream(system: str, user: str, model: str = None):
+    """流式调用，逐块 yield 文本，用于 SSE"""
+    payload = {
+        "model": model or config.MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "stream": True,
+        "options": {"temperature": config.TEMPERATURE,
+                    "num_predict": config.NUM_PREDICT},
+        "keep_alive": config.KEEP_ALIVE,
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        f"{config.OLLAMA_URL}/api/chat", data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=config.LLM_TIMEOUT) as resp:
+        for line in resp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line.decode("utf-8"))
+            except json.JSONDecodeError:
+                continue
+            piece = (obj.get("message") or {}).get("content") or ""
+            if piece:
+                yield piece
+            if obj.get("done"):
+                break
+
+
+def embed(text: str, model: str = None):
+    """文本向量化，用于语义缓存
+
+    强制 num_gpu=0：embedding 模型也有 1GB+，和 7b 抢显存会导致主模型被换出，
+    下次生成要重新加载 55 秒。放 CPU 上跑多花 100ms，比这个代价小得多。
+    """
+    payload = {
+        "model": model or config.EMBED_MODEL,
+        "prompt": text,
+        "options": {"num_gpu": 0},
+        "keep_alive": config.KEEP_ALIVE,
+    }
+    res = _post(f"{config.OLLAMA_URL}/api/embeddings", payload, 60)
+    vec = res.get("embedding")
+    if not vec:
+        raise LLMError("embedding 返回为空")
+    return vec
 
 
 def health() -> dict:
