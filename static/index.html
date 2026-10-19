@@ -167,6 +167,10 @@
     font-size:18.5px;font-weight:500;line-height:1.62;
     letter-spacing:-.1px;color:var(--ink);margin-bottom:18px;
   }
+  .answer.soft{
+    font-size:14.5px;font-weight:400;line-height:1.78;
+    color:var(--ink-2);letter-spacing:0;
+  }
   .metrics{
     display:flex;gap:0;border-top:1px solid #F1F3F6;border-bottom:1px solid #F1F3F6;
     padding:11px 0;margin-bottom:18px;
@@ -336,9 +340,9 @@ const EXAMPLES = [
 
 const STATUS_MAP = {
   ok:      ["查询成功", "b-ok"],
-  clarify: ["需要澄清", "b-warn"],
-  reject:  ["已拒绝",   "b-err"],
-  error:   ["执行失败", "b-err"]
+  clarify: ["需要确认", "b-warn"],
+  reject:  ["不在可查范围", "b-plain"],
+  error:   ["未能生成查询", "b-warn"]
 };
 
 const $ = id => document.getElementById(id);
@@ -369,13 +373,18 @@ function fmt(v){
 
 /* ---------- 渲染 ---------- */
 function render(res){
-  const [label, cls] = STATUS_MAP[res.status] || [res.status, "b-err"];
+  const isFb = res.fallback === true;
+  let label, cls;
+  if (isFb){ label = "数据概况"; cls = "b-plain"; }
+  else { [label, cls] = STATUS_MAP[res.status] || [res.status, "b-warn"]; }
+
   const t = res.trace || {};
   const stages = [];
   if (t.generate_ms) stages.push(`生成 ${t.generate_ms}ms`);
   if (t.execute_ms)  stages.push(`查询 ${t.execute_ms}ms`);
   if (t.summary_ms)  stages.push(`结论 ${t.summary_ms}ms`);
   if (t.retry_ms)    stages.push(`重试 ${t.retry_ms}ms`);
+  if (t.fallback)    stages.push(`已降级换用大模型`);
   if (t.cache_ms !== undefined && res.cached) stages.push(`命中 ${t.cache_ms}ms`);
 
   let h = '<div class="result">';
@@ -386,7 +395,7 @@ function render(res){
   h += `<span class="r-time">${(res.elapsed_ms/1000).toFixed(2)} s</span>`;
   h += '</div>';
 
-  h += `<div class="answer">${esc(res.answer) || "—"}</div>`;
+  h += `<div class="answer${isFb ? " soft" : ""}">${esc(res.answer) || "—"}</div>`;
 
   const rows = res.rows || [];
   h += '<div class="metrics">';
@@ -418,8 +427,8 @@ function render(res){
     h += `<div style="font-size:11.5px;color:#8A94A6;margin-top:12px">${stages.join(" · ")}</div>`;
   }
 
-  if (res.error){
-    h += `<div style="font-size:12px;color:#B45309;margin-top:12px">${esc(res.error)}</div>`;
+  if (res.note){
+    h += `<div style="font-size:11.5px;color:#8A94A6;margin-top:10px">说明：${esc(res.note)}</div>`;
   }
 
   h += '</div>';

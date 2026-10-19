@@ -59,6 +59,64 @@ def _parse(text: str):
     return "reject", f"无法解析模型输出：{t[:80]}"
 
 
+# 只有真正涉及个人身份或写操作的请求才拒绝，其余「字段不存在」都走数据概况
+# 判据看用户问题本身，而不是模型的拒绝理由——模型经常把"字段没有"说成"无权查询"
+SAFETY_WORDS = (
+    "手机号", "手机号码", "电话号", "身份证", "家庭住址", "银行卡",
+    "客户姓名", "客户名单", "个人信息", "隐私",
+    "删除", "改成", "改一下", "清空", "更新数据", "插入", "写入",
+)
+
+
+def _is_safety_request(question: str) -> bool:
+    return any(w in (question or "") for w in SAFETY_WORDS)
+
+
+def _overview(db_path, allowed, res: dict, t0: float, note: str = ""):
+    """兜底：不给报错，改为展示数据概况，并坦白说明没能理解问题
+
+    设计原则：宁可直接说"没懂"，也不能编一个看起来对的答案。
+    """
+    tables = list(allowed) if allowed else sorted(config.ALLOWED_TABLES)
+    try:
+        if len(tables) == 1:
+            t = tables[0]
+            cols, rows = db.run_query(f'SELECT * FROM "{t}" LIMIT 5', db_path)
+            total = db.run_query(f'SELECT COUNT(*) FROM "{t}"', db_path)[1][0][0]
+            shown = "、".join(cols[:10]) + ("…" if len(cols) > 10 else "")
+            example = f"{cols[0]} 有哪些取值" if cols else "数据里有什么"
+            res["answer"] = (
+                f"这个问题我没能转成查询，先把数据讲清楚：{t} 共 {total:,} 行、"
+                f"{len(cols)} 列（{shown}），下面是前 5 行。"
+                f"可以换个问法，比如「{example}」或「按 {cols[0] if cols else '某列'} 统计行数」。"
+            )
+            res["columns"] = cols
+            res["rows"] = rows
+        else:
+            parts = []
+            for t in tables:
+                try:
+                    n = db.run_query(f'SELECT COUNT(*) FROM "{t}"', db_path)[1][0][0]
+                    parts.append(f"{t} {n:,} 行")
+                except Exception:
+                    continue
+            res["answer"] = (
+                "这个问题我没能转成查询。库存里有：" + "、".join(parts) +
+                "。换个更具体的问法试试，比如「上个月各渠道的销售额」或「退货率最高的五个品类」。"
+            )
+    except Exception:
+        res["answer"] = "这个问题我没能处理。请换个问法，比如「上个月各渠道的销售额」。"
+
+    res["status"] = "ok"
+    res["fallback"] = True
+    # 模型的原始理由若把「字段不存在」说成隐私问题，就不展示，避免自相矛盾
+    if any(w in (note or "") for w in ("身份", "隐私", "无权")):
+        note = ""
+    res["note"] = (note or "")[:160]
+    res["sql"] = ""
+    return _finish(res, t0, cacheable=False)
+
+
 def pick_model(question: str, force: str = None) -> str:
     """模型路由
 
@@ -121,6 +179,8 @@ def ask(question: str, explain: bool = False, use_cache: bool = True,
         "cache": "miss",
         "model": "",
         "dataset": dataset or "",
+        "fallback": False,
+        "note": "",
         "elapsed_ms": 0,
         "trace": {},
     }
@@ -149,6 +209,10 @@ def ask(question: str, explain: bool = False, use_cache: bool = True,
 
     kind, payload = _parse(raw)
     if kind != "sql":
+        # 安全类拒绝（隐私 / 写操作）保持原样，这是必须守住的边界；
+        # 其余（字段不存在、没看懂）不当成失败，改为给数据概况
+        if kind == "reject" and not _is_safety_request(question):
+            return _overview(db_path, allowed, res, t0, note=payload)
         res["status"] = kind
         res["answer"] = payload
         return _finish(res, t0, cacheable=False)
@@ -199,10 +263,8 @@ def ask(question: str, explain: bool = False, use_cache: bool = True,
             _record(res)
             return ask(question, explain=explain, use_cache=False,
                        dataset=dataset, _force_model=config.MODEL)
-        res["status"] = "error"
-        res["error"] = error
-        res["answer"] = f"查询失败：{error}"
-        return _finish(res, t0, cacheable=False)
+        # 大模型也失败：兜底给数据概况，绝不把报错甩到页面上
+        return _overview(db_path, allowed, res, t0, note=error)
 
     res["columns"] = cols
     res["rows"] = rows

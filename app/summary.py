@@ -29,7 +29,25 @@ def _cn_labels(columns):
     from . import db
     m = dict(ALIAS_CN)
     m.update(db.column_cn_map())
-    return [m.get(c, c) for c in columns]
+    return [_one_label(m, c) for c in columns]
+
+
+def _one_label(m, c):
+    """列名可能是 SQL 表达式（COUNT(order_id)），换成人话"""
+    if c in m:
+        return m[c]
+    low = c.lower()
+    if low.startswith("count("):
+        return "数量"
+    if low.startswith("sum("):
+        return "合计"
+    if low.startswith("avg("):
+        return "平均值"
+    if low.startswith("max("):
+        return "最大值"
+    if low.startswith("min("):
+        return "最小值"
+    return c
 
 
 def _is_num(v):

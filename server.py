@@ -200,14 +200,15 @@ def main():
     print(f"访问地址 : http://127.0.0.1:{port}")
     print("=" * 56)
 
-    # 后台预热主模型：冷加载要 50 秒，不预热的话第一个真实请求要干等
+    # 后台预热：两个模型都过一遍，让权重进页缓存；否则首个请求要干等 40-80 秒
     def _warmup():
-        t = time.perf_counter()
-        try:
-            llm.chat("你是一个助手", "只回答一个字：好", num_predict=4)
-            print(f"[预热] 主模型已就绪，加载耗时 {time.perf_counter() - t:.0f}s", flush=True)
-        except Exception as e:
-            print(f"[预热] 主模型预热失败：{type(e).__name__}", flush=True)
+        for m in (config.MODEL, config.FAST_MODEL):
+            t = time.perf_counter()
+            try:
+                llm.chat("你是一个助手", "只回答一个字：好", num_predict=4, model=m)
+                print(f"[预热] {m} 就绪，{time.perf_counter() - t:.0f}s", flush=True)
+            except Exception as e:
+                print(f"[预热] {m} 失败：{type(e).__name__}", flush=True)
 
     threading.Thread(target=_warmup, daemon=True).start()
 
