@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -58,10 +58,45 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "rb") as f:
             self._send(200, f.read(), MIME.get(ext, "application/octet-stream"))
 
+    def _start_sse(self):
+        """SSE 不能设 Content-Length，否则浏览器要等全部内容"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+    def _sse(self, event, data):
+        self.wfile.write(
+            f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            .encode("utf-8"))
+        self.wfile.flush()
+
     # ---------- 路由 ----------
     def do_GET(self):
-        p = urlparse(self.path).path
+        u = urlparse(self.path)
+        p, qs = u.path, parse_qs(u.query)
         try:
+            if p == "/api/ask/stream":
+                q = (qs.get("q") or [""])[0].strip()
+                ds = (qs.get("dataset") or [""])[0] or None
+                if not q:
+                    self._json({"error": "q 不能为空"}, 400)
+                    return
+                self._start_sse()
+                try:
+                    for event, data in nl2sql.ask_stream(q, dataset=ds):
+                        self._sse(event, data)
+                    self._sse("done", {})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                except Exception as e:
+                    try:
+                        self._sse("error", {"message": f"{type(e).__name__}: {e}"})
+                    except Exception:
+                        pass
+                return
             if p in ("/", "/index.html"):
                 self._static("index.html")
             elif p == "/api/health":

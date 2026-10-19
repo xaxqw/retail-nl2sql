@@ -305,7 +305,119 @@ def _record(res: dict):
         pass
 
 
+def ask_stream(question: str, dataset: str = None):
+    """流式问数：先逐字推出 SQL，再推最终结果
+
+    总耗时不变，但首字 300ms 就能看到东西，不用对着白屏等 3 秒。
+    yield (event, data)，event 取 stage / token / result / error。
+    """
+    t0 = time.perf_counter()
+    trace_id = uuid.uuid4().hex[:12]
+
+    if dataset:
+        meta = ingest.get_dataset(dataset)
+        if not meta:
+            yield ("error", {"message": "数据集不存在或已被删除"})
+            return
+        db_path, allowed = meta["db_path"], [meta["table"]]
+        system = _upload_system(meta)
+        cache_key = f"[{dataset}] {question}"
+    else:
+        db_path, allowed = None, None
+        system = _system()
+        cache_key = question
+
+    if config.CACHE_ENABLED:
+        hit, how = cache.CACHE.get(cache_key)
+        if hit:
+            hit.update({"trace_id": trace_id, "cached": True, "cache": how,
+                        "dataset": dataset or "",
+                        "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+                        "trace": {"cache_ms": 0}})
+            yield ("stage", {"stage": "cache", "text": f"命中缓存（{how}）"})
+            _record(hit)
+            yield ("result", hit)
+            return
+
+    model = pick_model(question)
+    yield ("stage", {"stage": "generate", "model": model,
+                     "text": f"正在生成查询 · {model}"})
+
+    buf, first_ms = [], None
+    try:
+        for piece in llm.chat_stream(system, question, model=model):
+            if first_ms is None:
+                first_ms = int((time.perf_counter() - t0) * 1000)
+            buf.append(piece)
+            yield ("token", {"text": piece})
+    except Exception as e:
+        yield ("stage", {"stage": "retry", "text": "流式中断，改用常规生成"})
+        yield ("result", ask(question, dataset=dataset, use_cache=False))
+        return
+
+    raw = "".join(buf)
+    kind, payload = _parse(raw)
+
+    res = {
+        "trace_id": trace_id, "question": question, "status": "ok",
+        "sql": "", "columns": [], "rows": [], "answer": "", "error": "",
+        "retries": 0, "cached": False, "cache": "miss", "model": model,
+        "dataset": dataset or "", "fallback": False, "note": "",
+        "elapsed_ms": 0, "trace": {"generate_ms":
+                                   int((time.perf_counter() - t0) * 1000),
+                                   "first_token_ms": first_ms or 0},
+    }
+
+    if kind != "sql":
+        if kind == "reject" and not _is_safety_request(question):
+            _overview(db_path, allowed, res, t0, note=payload)
+            yield ("result", res)
+            return
+        res["status"] = kind
+        res["answer"] = payload
+        _finish(res, t0, cacheable=False)
+        yield ("result", res)
+        return
+
+    yield ("stage", {"stage": "execute", "text": "执行查询"})
+    ok, reason = guard.validate(payload, allowed)
+    if not ok:
+        yield ("stage", {"stage": "retry", "text": f"安全校验未过：{reason}"})
+        yield ("result", ask(question, dataset=dataset, use_cache=False))
+        return
+
+    final_sql = guard.ensure_limit(payload)
+    t_exec = time.perf_counter()
+    try:
+        cols, rows = db.run_query(final_sql, db_path)
+    except Exception as e:
+        yield ("stage", {"stage": "retry", "text": "执行失败，自动换模型重试"})
+        yield ("result", ask(question, dataset=dataset, use_cache=False,
+                             _force_model=config.MODEL))
+        return
+
+    res["trace"]["execute_ms"] = int((time.perf_counter() - t_exec) * 1000)
+    res["sql"] = final_sql
+    res["columns"] = cols
+    res["rows"] = rows
+
+    t_sum = time.perf_counter()
+    res["answer"] = summary.summarize(cols, rows, question)
+    res["trace"]["summary_ms"] = int((time.perf_counter() - t_sum) * 1000)
+
+    _finish(res, t0, cacheable=True, cache_key=cache_key)
+    yield ("result", res)
+
+
 def _finish(res: dict, t0: float, cacheable: bool, cache_key: str = None) -> dict:
+    res["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+    if cacheable and res["status"] == "ok":
+        try:
+            cache.CACHE.put(cache_key or res["question"], res)
+        except Exception:
+            pass
+    _record(res)
+    return res
     res["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
     if cacheable and res["status"] == "ok":
         try:

@@ -230,6 +230,15 @@
   }
   .copy:hover{color:var(--accent);border-color:#C3D3EC}
 
+  pre.live{
+    margin:0;padding:14px 16px;background:#0F172A;color:#D6E2F0;
+    border-radius:10px;font-family:"SF Mono",Consolas,"Courier New",monospace;
+    font-size:12.5px;line-height:1.72;min-height:58px;
+    white-space:pre-wrap;word-break:break-all;
+  }
+  pre.live:empty::after{content:"…";color:#5B6B80}
+  .live-hint{font-size:12px;color:var(--ink-3);margin-top:10px;display:flex;align-items:center;gap:8px}
+
   .empty{
     background:var(--card);border:1px dashed var(--line-strong);
     border-radius:var(--radius);padding:52px 24px;text-align:center;
@@ -353,7 +362,7 @@ EXAMPLES.forEach(t => {
   const el = document.createElement("span");
   el.className = "chip";
   el.textContent = t;
-  el.onclick = () => { ta.value = t; ask(); };
+  el.onclick = () => { ta.value = t; askStream(); };
   $("examples").appendChild(el);
 });
 
@@ -497,10 +506,107 @@ async function refreshHealth(){
 }
 
 /* ---------- 事件 ---------- */
-go.onclick = ask;
+go.onclick = askStream;
 ta.addEventListener("keydown", e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") ask();
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") askStream();
 });
+
+/* ---------- 流式问数 ---------- */
+async function askStream(){
+  const q = ta.value.trim();
+  if (!q) return;
+  go.disabled = true;
+
+  let url = "/api/ask/stream?q=" + encodeURIComponent(q);
+  if (currentDataset) url += "&dataset=" + encodeURIComponent(currentDataset);
+
+  const t0 = Date.now();
+  out.innerHTML = `
+    <div class="result">
+      <div class="r-head">
+        <span class="badge b-plain" id="stBadge">生成中</span>
+        <span class="r-time" id="stTime">0.0 s</span>
+      </div>
+      <div class="sect">
+        <div class="block-t">正在生成的 SQL</div>
+        <pre class="live" id="liveSql"></pre>
+      </div>
+      <div class="live-hint"><span class="spin"></span><span id="stageText">连接模型…</span></div>
+    </div>`;
+
+  const tick = setInterval(() => {
+    const el = $("stTime");
+    if (el) el.textContent = ((Date.now() - t0) / 1000).toFixed(1) + " s";
+  }, 100);
+
+  try{
+    const resp = await fetch(url);
+    if (!resp.ok || !resp.body) throw new Error("流式接口不可用");
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", sqlText = "", firstMs = null;
+
+    while (true){
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0){
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+
+        let ev = "message", data = "";
+        chunk.split("\n").forEach(line => {
+          if (line.startsWith("event: ")) ev = line.slice(7).trim();
+          else if (line.startsWith("data: ")) data = line.slice(6);
+        });
+        if (!data) continue;
+
+        let obj;
+        try { obj = JSON.parse(data); } catch(e){ continue; }
+
+        if (ev === "token"){
+          sqlText += obj.text || "";
+          const el = $("liveSql");
+          if (el) el.textContent = sqlText;
+          if (firstMs === null){
+            firstMs = Date.now() - t0;
+            const b = $("stBadge");
+            if (b) b.textContent = `首字 ${firstMs} ms`;
+          }
+        } else if (ev === "stage"){
+          const s = $("stageText");
+          if (s) s.textContent = obj.text || "";
+          if (obj.stage === "execute"){
+            const b = $("stBadge");
+            if (b) b.textContent = "执行中";
+          }
+        } else if (ev === "result"){
+          clearInterval(tick);
+          render(obj);
+          refreshMetrics();
+          return;
+        } else if (ev === "error"){
+          clearInterval(tick);
+          out.innerHTML = `<div class="err-box"><div class="t">生成中断</div>
+            <div class="d">${esc(obj.message || "未知错误")}</div></div>`;
+          return;
+        }
+      }
+    }
+    // 流结束但没拿到结果
+    out.innerHTML = `<div class="err-box"><div class="t">未收到结果</div>
+      <div class="d">服务端结束了响应但没有返回数据，请重试</div></div>`;
+  }catch(e){
+    out.innerHTML = `<div class="err-box"><div class="t">请求异常</div>
+      <div class="d">${esc(e.message)}</div></div>`;
+  }finally{
+    clearInterval(tick);
+    go.disabled = false;
+  }
+}
 
 /* ---------- 数据源管理 ---------- */
 let currentDataset = "";
